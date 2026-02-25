@@ -1,86 +1,155 @@
+// src/server.js
 try { require("dotenv").config(); } catch {}
 
 const express = require("express");
-const { z } = require("zod");
+const cors = require("cors");
 
 const app = express();
-app.use(express.json());
+app.use(cors()); // <- CRÍTICO pra NicoChat (browser)
+app.use(express.json({ limit: "1mb" }));
 
-const PORT = process.env.PORT || 3000;
-const TOKEN = process.env.MCP_BEARER_TOKEN || "";
+const PORT = Number(process.env.PORT || 3000);
+const BEARER = process.env.MCP_BEARER_TOKEN || ""; // vazio = sem auth
 
-/* Tools */
+function isAuthed(req) {
+  if (!BEARER) return true;
+  const auth = req.headers.authorization || "";
+  return auth === `Bearer ${BEARER}`;
+}
+
+// ---- Tools (com JSON Schema real) ----
 const tools = {
   ping: {
-    description: "Retorna pong",
-    schema: z.object({ message: z.string().optional() }),
-    handler: async ({ message }) => ({
-      content: [{ type: "text", text: `pong${message ? `: ${message}` : ""}` }]
-    })
+    description: "Retorna pong (teste de integração)",
+    inputSchema: {
+      type: "object",
+      properties: { message: { type: "string" } },
+      additionalProperties: false,
+    },
+    handler: async (args = {}) => {
+      const msg = typeof args.message === "string" ? args.message : "";
+      return {
+        content: [{ type: "text", text: `pong${msg ? `: ${msg}` : ""}` }],
+      };
+    },
   },
+
   time_now: {
-    description: "Retorna hora ISO",
-    schema: z.object({}),
+    description: "Retorna a hora ISO do servidor",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
     handler: async () => ({
-      content: [{ type: "text", text: new Date().toISOString() }]
-    })
-  }
+      content: [{ type: "text", text: new Date().toISOString() }],
+    }),
+  },
 };
 
-/* MCP endpoint */
+// Health
+app.get("/health", (req, res) => res.json({ ok: true }));
+
+// (fallback) lista tools em REST
+app.get("/mcp/tools", (req, res) => {
+  if (!isAuthed(req)) return res.status(401).send("Unauthorized");
+  res.json(
+    Object.entries(tools).map(([name, t]) => ({
+      name,
+      description: t.description,
+      inputSchema: t.inputSchema,
+    }))
+  );
+});
+
+// (fallback) call em REST
+app.post("/mcp/call", async (req, res) => {
+  if (!isAuthed(req)) return res.status(401).send("Unauthorized");
+  try {
+    const { name, arguments: args } = req.body || {};
+    const tool = tools[name];
+    if (!tool) return res.status(404).json({ ok: false, error: "Tool not found" });
+    const result = await tool.handler(args || {});
+    res.json({ ok: true, result });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// MCP JSON-RPC endpoint
 app.post("/mcp", async (req, res) => {
-  if (TOKEN) {
-    const auth = req.headers.authorization || "";
-    if (auth !== `Bearer ${TOKEN}`) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+  if (!isAuthed(req)) {
+    return res.status(401).json({ jsonrpc: "2.0", id: req.body?.id ?? null, error: { message: "Unauthorized" } });
   }
 
-  const { method, params, id } = req.body;
+  const { jsonrpc, method, params, id } = req.body || {};
 
-  if (method === "tools/list") {
-    return res.json({
-      jsonrpc: "2.0",
-      id,
-      result: {
-        tools: Object.entries(tools).map(([name, t]) => ({
-          name,
-          description: t.description,
-          input_schema: t.schema
-        }))
-      }
-    });
-  }
+  // aceita sem jsonrpc também (cliente “solto”)
+  const rpcId = id ?? null;
 
-  if (method === "tools/call") {
-    const tool = tools[params.name];
-    if (!tool) {
+  try {
+    if (method === "tools/list") {
       return res.json({
         jsonrpc: "2.0",
-        id,
-        error: { message: "Tool not found" }
+        id: rpcId,
+        result: {
+          tools: Object.entries(tools).map(([name, t]) => ({
+            name,
+            description: t.description,
+            inputSchema: t.inputSchema, // <- formato que cliente espera
+          })),
+        },
       });
     }
 
-    const parsed = tool.schema.parse(params.arguments || {});
-    const result = await tool.handler(parsed);
+    if (method === "tools/call") {
+      const toolName = params?.name;
+      const args = params?.arguments || {};
+      const tool = tools[toolName];
+
+      if (!tool) {
+        return res.json({
+          jsonrpc: "2.0",
+          id: rpcId,
+          error: { message: "Tool not found" },
+        });
+      }
+
+      const result = await tool.handler(args);
+
+      return res.json({
+        jsonrpc: "2.0",
+        id: rpcId,
+        result,
+      });
+    }
+
+    // alguns clientes tentam "initialize" / "ping"
+    if (method === "initialize") {
+      return res.json({
+        jsonrpc: "2.0",
+        id: rpcId,
+        result: { serverInfo: { name: "mcp-concierge", version: "1.0.0" } },
+      });
+    }
 
     return res.json({
       jsonrpc: "2.0",
-      id,
-      result
+      id: rpcId,
+      error: { message: "Method not found" },
+    });
+  } catch (e) {
+    return res.status(400).json({
+      jsonrpc: "2.0",
+      id: rpcId,
+      error: { message: String(e?.message || e) },
     });
   }
-
-  res.json({
-    jsonrpc: "2.0",
-    id,
-    error: { message: "Method not found" }
-  });
 });
 
-app.get("/health", (req, res) => res.json({ ok: true }));
+// só pra evitar confusão se alguém abrir no browser
+app.get("/mcp", (req, res) => res.status(200).send("OK. Use POST /mcp (JSON-RPC)."));
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log("MCP Server running on port", PORT);
+  console.log(`MCP server on 0.0.0.0:${PORT}`);
 });
