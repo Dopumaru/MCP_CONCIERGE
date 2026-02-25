@@ -1,5 +1,7 @@
 // src/server.js
-try { require("dotenv").config(); } catch {}
+try {
+  require("dotenv").config();
+} catch {}
 
 const express = require("express");
 const cors = require("cors");
@@ -7,11 +9,13 @@ const cors = require("cors");
 const app = express();
 
 // CORS explícito (inclui Authorization + preflight)
-app.use(cors({
-  origin: "*",
-  methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-}));
+app.use(
+  cors({
+    origin: "*",
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "Accept"],
+  })
+);
 app.options("*", cors());
 
 app.use(express.json({ limit: "1mb" }));
@@ -67,16 +71,16 @@ function sseHeaders(res) {
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
-  // MUITO importante em proxies (nginx / easypanel) pra não bufferizar SSE
+  // importante em proxies (nginx / easypanel) pra não bufferizar SSE
   res.setHeader("X-Accel-Buffering", "no");
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   if (typeof res.flushHeaders === "function") res.flushHeaders();
 }
 
-function sseSend(res, event, dataObj) {
-  if (event) res.write(`event: ${event}\n`);
+function sseSendData(res, dataObj) {
+  // DigoChat costuma esperar JSON-RPC no "data:" (sem event custom)
   res.write(`data: ${JSON.stringify(dataObj)}\n\n`);
 }
 
@@ -85,8 +89,14 @@ function handleSseListTools(req, res) {
 
   sseHeaders(res);
 
-  // manda a lista de ferramentas
-  sseSend(res, "tools", { tools: listToolsPayload() });
+  // manda tools/list no formato JSON-RPC (o que clientes MCP/SSE costumam aceitar)
+  const payload = {
+    jsonrpc: "2.0",
+    method: "tools/list",
+    result: { tools: listToolsPayload() },
+  };
+
+  sseSendData(res, payload);
 
   // keep-alive ping (pra não cair por timeout)
   const timer = setInterval(() => {
@@ -99,17 +109,18 @@ function handleSseListTools(req, res) {
 // Health
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-// ✅ Rotas SSE que o DigoChat pode chamar
+// ✅ Rotas SSE (DigoChat pode chamar qualquer uma dessas)
 app.get("/list-tools", (req, res) => handleSseListTools(req, res));
 app.get("/mcp/list-tools", (req, res) => handleSseListTools(req, res));
 app.get("/mcp", (req, res) => handleSseListTools(req, res));
 
-// (extra) se o DigoChat usar outro path com SSE, ainda funciona
+// (extra) /tools e / aceitam SSE se vier Accept: text/event-stream
 app.get("/tools", (req, res) => {
   if (wantsSSE(req)) return handleSseListTools(req, res);
   if (!isAuthed(req)) return res.status(401).send("Unauthorized");
   res.json(listToolsPayload());
 });
+
 app.get("/", (req, res) => {
   if (wantsSSE(req)) return handleSseListTools(req, res);
   res.status(200).send("OK. Use SSE (GET /list-tools) ou JSON-RPC (POST /mcp).");
@@ -126,12 +137,13 @@ app.post("/mcp", async (req, res) => {
   }
 
   const { method, params, id } = req.body || {};
+  const rpcId = id ?? null;
 
   try {
     if (method === "tools/list") {
       return res.json({
         jsonrpc: "2.0",
-        id: id ?? null,
+        id: rpcId,
         result: { tools: listToolsPayload() },
       });
     }
@@ -142,26 +154,34 @@ app.post("/mcp", async (req, res) => {
       const tool = tools[toolName];
 
       if (!tool) {
-        return res.json({ jsonrpc: "2.0", id: id ?? null, error: { message: "Tool not found" } });
+        return res.json({
+          jsonrpc: "2.0",
+          id: rpcId,
+          error: { message: "Tool not found" },
+        });
       }
 
       const result = await tool.handler(args);
-      return res.json({ jsonrpc: "2.0", id: id ?? null, result });
+      return res.json({ jsonrpc: "2.0", id: rpcId, result });
     }
 
     if (method === "initialize") {
       return res.json({
         jsonrpc: "2.0",
-        id: id ?? null,
+        id: rpcId,
         result: { serverInfo: { name: "mcp-concierge", version: "1.0.0" } },
       });
     }
 
-    return res.json({ jsonrpc: "2.0", id: id ?? null, error: { message: "Method not found" } });
+    return res.json({
+      jsonrpc: "2.0",
+      id: rpcId,
+      error: { message: "Method not found" },
+    });
   } catch (e) {
     return res.status(400).json({
       jsonrpc: "2.0",
-      id: id ?? null,
+      id: rpcId,
       error: { message: String(e?.message || e) },
     });
   }
