@@ -1,74 +1,86 @@
-// src/server.js
-
-// dotenv opcional: local ok, produção (painel) não quebra
-try {
-  require("dotenv").config();
-} catch (_) {}
+try { require("dotenv").config(); } catch {}
 
 const express = require("express");
 const { z } = require("zod");
 
 const app = express();
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json());
 
-const PORT = Number(process.env.PORT || 3000);
-const BEARER = process.env.MCP_BEARER_TOKEN || ""; // se vazio, sem auth
+const PORT = process.env.PORT || 3000;
+const TOKEN = process.env.MCP_BEARER_TOKEN || "";
 
-function checkAuth(req) {
-  if (!BEARER) return true;
-  const auth = req.headers.authorization || "";
-  return auth === `Bearer ${BEARER}`;
-}
-
-// Tools registry
+/* Tools */
 const tools = {
   ping: {
-    description: "Retorna pong (teste de integração)",
+    description: "Retorna pong",
     schema: z.object({ message: z.string().optional() }),
     handler: async ({ message }) => ({
-      content: [{ type: "text", text: `pong${message ? `: ${message}` : ""}` }],
-    }),
+      content: [{ type: "text", text: `pong${message ? `: ${message}` : ""}` }]
+    })
   },
   time_now: {
-    description: "Retorna a hora ISO do servidor",
+    description: "Retorna hora ISO",
     schema: z.object({}),
     handler: async () => ({
-      content: [{ type: "text", text: new Date().toISOString() }],
-    }),
-  },
+      content: [{ type: "text", text: new Date().toISOString() }]
+    })
+  }
 };
 
-// Health
-app.get("/health", (req, res) => res.json({ ok: true }));
+/* MCP endpoint */
+app.post("/mcp", async (req, res) => {
+  if (TOKEN) {
+    const auth = req.headers.authorization || "";
+    if (auth !== `Bearer ${TOKEN}`) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+  }
 
-// Lista tools (debug)
-app.get("/tools", (req, res) => {
-  res.json(
-    Object.entries(tools).map(([name, t]) => ({
-      name,
-      description: t.description,
-    }))
-  );
-});
+  const { method, params, id } = req.body;
 
-// Chama tool (debug)
-app.post("/call", async (req, res) => {
-  if (!checkAuth(req)) return res.status(401).send("Unauthorized");
+  if (method === "tools/list") {
+    return res.json({
+      jsonrpc: "2.0",
+      id,
+      result: {
+        tools: Object.entries(tools).map(([name, t]) => ({
+          name,
+          description: t.description,
+          input_schema: t.schema
+        }))
+      }
+    });
+  }
 
-  try {
-    const { name, args } = req.body || {};
-    const tool = tools[name];
-    if (!tool) return res.status(404).json({ ok: false, error: "Tool not found" });
+  if (method === "tools/call") {
+    const tool = tools[params.name];
+    if (!tool) {
+      return res.json({
+        jsonrpc: "2.0",
+        id,
+        error: { message: "Tool not found" }
+      });
+    }
 
-    const parsed = tool.schema.parse(args || {});
+    const parsed = tool.schema.parse(params.arguments || {});
     const result = await tool.handler(parsed);
 
-    res.json({ ok: true, result });
-  } catch (e) {
-    res.status(400).json({ ok: false, error: String(e?.message || e) });
+    return res.json({
+      jsonrpc: "2.0",
+      id,
+      result
+    });
   }
+
+  res.json({
+    jsonrpc: "2.0",
+    id,
+    error: { message: "Method not found" }
+  });
 });
 
+app.get("/health", (req, res) => res.json({ ok: true }));
+
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Server on http://0.0.0.0:${PORT}`);
+  console.log("MCP Server running on port", PORT);
 });
