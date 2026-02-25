@@ -63,6 +63,7 @@ app.post("/call", async (req, res) => {
   }
 });
 
+// ✅ importante pra EasyPanel/Docker: escutar em 0.0.0.0
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server on http://0.0.0.0:${PORT}`);
 });
