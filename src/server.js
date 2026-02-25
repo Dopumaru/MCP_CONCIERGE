@@ -163,4 +163,31 @@ app.get("/mcp", (req, res) => res.status(200).send("OK. Use POST /mcp (JSON-RPC)
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`MCP server on 0.0.0.0:${PORT}`);
+
+  // Compatibilidade DigoChat
+app.post("/list-tools", (req, res) => {
+  if (!isAuthed(req)) return res.status(401).json({ status: "error", error: "Unauthorized" });
+
+  res.json({
+    status: "success",
+    tools: Object.entries(tools).map(([name, t]) => ({
+      name,
+      description: t.description,
+      inputSchema: t.inputSchema
+    }))
+  });
 });
+
+app.post("/mcp/list-tools", (req, res) => {
+  if (!isAuthed(req)) return res.status(401).json({ status: "error", error: "Unauthorized" });
+
+  res.json({
+    status: "success",
+    tools: Object.entries(tools).map(([name, t]) => ({
+      name,
+      description: t.description,
+      inputSchema: t.inputSchema
+    }))
+  });
+});
+
