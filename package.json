@@ -4,6 +4,9 @@
   "private": true,
   "type": "commonjs",
   "main": "src/server.js",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node src/server.js"
   },
