@@ -7,11 +7,13 @@ const cors = require("cors");
 const app = express();
 
 // CORS bem explícito (inclui Authorization + preflight)
-app.use(cors({
-  origin: "*",
-  methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-}));
+app.use(
+  cors({
+    origin: "*",
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
 app.options("*", cors());
 
 app.use(express.json({ limit: "1mb" }));
@@ -41,6 +43,7 @@ const tools = {
       };
     },
   },
+
   time_now: {
     description: "Retorna a hora ISO do servidor",
     inputSchema: {
@@ -57,7 +60,7 @@ const tools = {
 // Health
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-// Alias REST (pra debug)
+// ---------- REST debug ----------
 app.get("/tools", (req, res) => {
   if (!isAuthed(req)) return res.status(401).send("Unauthorized");
   res.json(
@@ -69,13 +72,13 @@ app.get("/tools", (req, res) => {
   );
 });
 
-// Alias REST (pra debug)
 app.post("/call", async (req, res) => {
   if (!isAuthed(req)) return res.status(401).send("Unauthorized");
   try {
     const { name, arguments: args } = req.body || {};
     const tool = tools[name];
     if (!tool) return res.status(404).json({ ok: false, error: "Tool not found" });
+
     const result = await tool.handler(args || {});
     res.json({ ok: true, result });
   } catch (e) {
@@ -83,6 +86,39 @@ app.post("/call", async (req, res) => {
   }
 });
 
+// ---------- Compat DigoChat (REST próprio) ----------
+function digochatToolsPayload() {
+  return {
+    status: "success",
+    tools: Object.entries(tools).map(([name, t]) => ({
+      name,
+      description: t.description,
+      inputSchema: t.inputSchema,
+    })),
+  };
+}
+
+app.post("/list-tools", (req, res) => {
+  if (!isAuthed(req)) return res.status(401).json({ status: "error", error: "Unauthorized" });
+  res.json(digochatToolsPayload());
+});
+
+app.post("/mcp/list-tools", (req, res) => {
+  if (!isAuthed(req)) return res.status(401).json({ status: "error", error: "Unauthorized" });
+  res.json(digochatToolsPayload());
+});
+
+// (se o DigoChat chamar GET em vez de POST)
+app.get("/list-tools", (req, res) => {
+  if (!isAuthed(req)) return res.status(401).json({ status: "error", error: "Unauthorized" });
+  res.json(digochatToolsPayload());
+});
+app.get("/mcp/list-tools", (req, res) => {
+  if (!isAuthed(req)) return res.status(401).json({ status: "error", error: "Unauthorized" });
+  res.json(digochatToolsPayload());
+});
+
+// ---------- MCP JSON-RPC ----------
 async function handleMcpRpc(req, res) {
   if (!isAuthed(req)) {
     return res.status(401).json({
@@ -163,31 +199,4 @@ app.get("/mcp", (req, res) => res.status(200).send("OK. Use POST /mcp (JSON-RPC)
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`MCP server on 0.0.0.0:${PORT}`);
-
-  // Compatibilidade DigoChat
-app.post("/list-tools", (req, res) => {
-  if (!isAuthed(req)) return res.status(401).json({ status: "error", error: "Unauthorized" });
-
-  res.json({
-    status: "success",
-    tools: Object.entries(tools).map(([name, t]) => ({
-      name,
-      description: t.description,
-      inputSchema: t.inputSchema
-    }))
-  });
 });
-
-app.post("/mcp/list-tools", (req, res) => {
-  if (!isAuthed(req)) return res.status(401).json({ status: "error", error: "Unauthorized" });
-
-  res.json({
-    status: "success",
-    tools: Object.entries(tools).map(([name, t]) => ({
-      name,
-      description: t.description,
-      inputSchema: t.inputSchema
-    }))
-  });
-});
-
