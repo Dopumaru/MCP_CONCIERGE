@@ -6,20 +6,15 @@ const cors = require("cors");
 
 const app = express();
 
-// CORS bem explícito (inclui Authorization + preflight)
-app.use(
-  cors({
-    origin: "*",
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  })
-);
-app.options("*", cors());
-
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+}));
 app.use(express.json({ limit: "1mb" }));
 
 const PORT = Number(process.env.PORT || 3000);
-const BEARER = process.env.MCP_BEARER_TOKEN || ""; // vazio = sem auth
+const BEARER = process.env.MCP_BEARER_TOKEN || "";
 
 function isAuthed(req) {
   if (!BEARER) return true;
@@ -27,30 +22,22 @@ function isAuthed(req) {
   return auth === `Bearer ${BEARER}`;
 }
 
-// ---- Tools (JSON Schema) ----
+// ---- Tools ----
 const tools = {
   ping: {
-    description: "Retorna pong (teste de integração)",
+    description: "Retorna pong",
     inputSchema: {
       type: "object",
       properties: { message: { type: "string" } },
       additionalProperties: false,
     },
-    handler: async (args = {}) => {
-      const msg = typeof args.message === "string" ? args.message : "";
-      return {
-        content: [{ type: "text", text: `pong${msg ? `: ${msg}` : ""}` }],
-      };
-    },
+    handler: async (args = {}) => ({
+      content: [{ type: "text", text: `pong${args.message || ""}` }],
+    }),
   },
-
   time_now: {
-    description: "Retorna a hora ISO do servidor",
-    inputSchema: {
-      type: "object",
-      properties: {},
-      additionalProperties: false,
-    },
+    description: "Hora atual ISO",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
     handler: async () => ({
       content: [{ type: "text", text: new Date().toISOString() }],
     }),
@@ -60,66 +47,33 @@ const tools = {
 // Health
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-// ---------- REST debug ----------
-app.get("/tools", (req, res) => {
-  if (!isAuthed(req)) return res.status(401).send("Unauthorized");
-  res.json(
-    Object.entries(tools).map(([name, t]) => ({
-      name,
-      description: t.description,
-      inputSchema: t.inputSchema,
-    }))
-  );
-});
+// -----------------------------
+// 🔥 SSE ENDPOINT (DigoChat)
+// -----------------------------
+app.get("/mcp", (req, res) => {
+  if (!isAuthed(req)) return res.status(401).end();
 
-app.post("/call", async (req, res) => {
-  if (!isAuthed(req)) return res.status(401).send("Unauthorized");
-  try {
-    const { name, arguments: args } = req.body || {};
-    const tool = tools[name];
-    if (!tool) return res.status(404).json({ ok: false, error: "Tool not found" });
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
 
-    const result = await tool.handler(args || {});
-    res.json({ ok: true, result });
-  } catch (e) {
-    res.status(400).json({ ok: false, error: String(e?.message || e) });
-  }
-});
-
-// ---------- Compat DigoChat (REST próprio) ----------
-function digochatToolsPayload() {
-  return {
-    status: "success",
+  // envia lista de tools automaticamente
+  const payload = {
+    type: "tools",
     tools: Object.entries(tools).map(([name, t]) => ({
       name,
       description: t.description,
       inputSchema: t.inputSchema,
     })),
   };
-}
 
-app.post("/list-tools", (req, res) => {
-  if (!isAuthed(req)) return res.status(401).json({ status: "error", error: "Unauthorized" });
-  res.json(digochatToolsPayload());
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
 });
 
-app.post("/mcp/list-tools", (req, res) => {
-  if (!isAuthed(req)) return res.status(401).json({ status: "error", error: "Unauthorized" });
-  res.json(digochatToolsPayload());
-});
-
-// (se o DigoChat chamar GET em vez de POST)
-app.get("/list-tools", (req, res) => {
-  if (!isAuthed(req)) return res.status(401).json({ status: "error", error: "Unauthorized" });
-  res.json(digochatToolsPayload());
-});
-app.get("/mcp/list-tools", (req, res) => {
-  if (!isAuthed(req)) return res.status(401).json({ status: "error", error: "Unauthorized" });
-  res.json(digochatToolsPayload());
-});
-
-// ---------- MCP JSON-RPC ----------
-async function handleMcpRpc(req, res) {
+// -----------------------------
+// JSON-RPC fallback
+// -----------------------------
+app.post("/mcp", async (req, res) => {
   if (!isAuthed(req)) {
     return res.status(401).json({
       jsonrpc: "2.0",
@@ -129,74 +83,42 @@ async function handleMcpRpc(req, res) {
   }
 
   const { method, params, id } = req.body || {};
-  const rpcId = id ?? null;
 
-  try {
-    if (method === "tools/list") {
-      return res.json({
-        jsonrpc: "2.0",
-        id: rpcId,
-        result: {
-          tools: Object.entries(tools).map(([name, t]) => ({
-            name,
-            description: t.description,
-            inputSchema: t.inputSchema,
-          })),
-        },
-      });
-    }
-
-    if (method === "tools/call") {
-      const toolName = params?.name;
-      const args = params?.arguments || {};
-      const tool = tools[toolName];
-
-      if (!tool) {
-        return res.json({
-          jsonrpc: "2.0",
-          id: rpcId,
-          error: { message: "Tool not found" },
-        });
-      }
-
-      const result = await tool.handler(args);
-
-      return res.json({
-        jsonrpc: "2.0",
-        id: rpcId,
-        result,
-      });
-    }
-
-    if (method === "initialize") {
-      return res.json({
-        jsonrpc: "2.0",
-        id: rpcId,
-        result: { serverInfo: { name: "mcp-concierge", version: "1.0.0" } },
-      });
-    }
-
+  if (method === "tools/list") {
     return res.json({
       jsonrpc: "2.0",
-      id: rpcId,
-      error: { message: "Method not found" },
-    });
-  } catch (e) {
-    return res.status(400).json({
-      jsonrpc: "2.0",
-      id: rpcId,
-      error: { message: String(e?.message || e) },
+      id,
+      result: {
+        tools: Object.entries(tools).map(([name, t]) => ({
+          name,
+          description: t.description,
+          inputSchema: t.inputSchema,
+        })),
+      },
     });
   }
-}
 
-// ✅ aceita tanto /mcp quanto / (muitos clientes usam root)
-app.post("/mcp", handleMcpRpc);
-app.post("/", handleMcpRpc);
+  if (method === "tools/call") {
+    const tool = tools[params?.name];
+    if (!tool) {
+      return res.json({
+        jsonrpc: "2.0",
+        id,
+        error: { message: "Tool not found" },
+      });
+    }
 
-// só pra browser
-app.get("/mcp", (req, res) => res.status(200).send("OK. Use POST /mcp (JSON-RPC)."));
+    const result = await tool.handler(params?.arguments || {});
+    return res.json({ jsonrpc: "2.0", id, result });
+  }
+
+  res.json({
+    jsonrpc: "2.0",
+    id,
+    error: { message: "Method not found" },
+  });
+});
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`MCP server on 0.0.0.0:${PORT}`);
+  console.log(`MCP server running on port ${PORT}`);
 });
