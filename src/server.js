@@ -5,7 +5,15 @@ const express = require("express");
 const cors = require("cors");
 
 const app = express();
-app.use(cors()); // <- CRÍTICO pra NicoChat (browser)
+
+// CORS bem explícito (inclui Authorization + preflight)
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+}));
+app.options("*", cors());
+
 app.use(express.json({ limit: "1mb" }));
 
 const PORT = Number(process.env.PORT || 3000);
@@ -17,7 +25,7 @@ function isAuthed(req) {
   return auth === `Bearer ${BEARER}`;
 }
 
-// ---- Tools (com JSON Schema real) ----
+// ---- Tools (JSON Schema) ----
 const tools = {
   ping: {
     description: "Retorna pong (teste de integração)",
@@ -33,7 +41,6 @@ const tools = {
       };
     },
   },
-
   time_now: {
     description: "Retorna a hora ISO do servidor",
     inputSchema: {
@@ -50,8 +57,8 @@ const tools = {
 // Health
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-// (fallback) lista tools em REST
-app.get("/mcp/tools", (req, res) => {
+// Alias REST (pra debug)
+app.get("/tools", (req, res) => {
   if (!isAuthed(req)) return res.status(401).send("Unauthorized");
   res.json(
     Object.entries(tools).map(([name, t]) => ({
@@ -62,8 +69,8 @@ app.get("/mcp/tools", (req, res) => {
   );
 });
 
-// (fallback) call em REST
-app.post("/mcp/call", async (req, res) => {
+// Alias REST (pra debug)
+app.post("/call", async (req, res) => {
   if (!isAuthed(req)) return res.status(401).send("Unauthorized");
   try {
     const { name, arguments: args } = req.body || {};
@@ -76,15 +83,16 @@ app.post("/mcp/call", async (req, res) => {
   }
 });
 
-// MCP JSON-RPC endpoint
-app.post("/mcp", async (req, res) => {
+async function handleMcpRpc(req, res) {
   if (!isAuthed(req)) {
-    return res.status(401).json({ jsonrpc: "2.0", id: req.body?.id ?? null, error: { message: "Unauthorized" } });
+    return res.status(401).json({
+      jsonrpc: "2.0",
+      id: req.body?.id ?? null,
+      error: { message: "Unauthorized" },
+    });
   }
 
-  const { jsonrpc, method, params, id } = req.body || {};
-
-  // aceita sem jsonrpc também (cliente “solto”)
+  const { method, params, id } = req.body || {};
   const rpcId = id ?? null;
 
   try {
@@ -96,7 +104,7 @@ app.post("/mcp", async (req, res) => {
           tools: Object.entries(tools).map(([name, t]) => ({
             name,
             description: t.description,
-            inputSchema: t.inputSchema, // <- formato que cliente espera
+            inputSchema: t.inputSchema,
           })),
         },
       });
@@ -124,7 +132,6 @@ app.post("/mcp", async (req, res) => {
       });
     }
 
-    // alguns clientes tentam "initialize" / "ping"
     if (method === "initialize") {
       return res.json({
         jsonrpc: "2.0",
@@ -145,9 +152,13 @@ app.post("/mcp", async (req, res) => {
       error: { message: String(e?.message || e) },
     });
   }
-});
+}
 
-// só pra evitar confusão se alguém abrir no browser
+// ✅ aceita tanto /mcp quanto / (muitos clientes usam root)
+app.post("/mcp", handleMcpRpc);
+app.post("/", handleMcpRpc);
+
+// só pra browser
 app.get("/mcp", (req, res) => res.status(200).send("OK. Use POST /mcp (JSON-RPC)."));
 
 app.listen(PORT, "0.0.0.0", () => {
