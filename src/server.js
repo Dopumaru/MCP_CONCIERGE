@@ -1,4 +1,10 @@
-require("dotenv").config();
+// src/server.js
+
+// dotenv opcional: local ok, produção (painel) não quebra
+try {
+  require("dotenv").config();
+} catch (_) {}
+
 const express = require("express");
 const { z } = require("zod");
 
@@ -59,11 +65,10 @@ app.post("/call", async (req, res) => {
 
     res.json({ ok: true, result });
   } catch (e) {
-    res.status(400).json({ ok: false, error: String(e.message || e) });
+    res.status(400).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
-// ✅ importante pra EasyPanel/Docker: escutar em 0.0.0.0
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server on http://0.0.0.0:${PORT}`);
 });
