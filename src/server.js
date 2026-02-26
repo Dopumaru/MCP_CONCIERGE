@@ -23,15 +23,13 @@ const BEARER = process.env.MCP_BEARER_TOKEN || ""; // vazio = sem auth
 function isAuthed(req) {
   if (!BEARER) return true;
 
-  // padrão: Authorization: Bearer xxx
   const auth = String(req.headers.authorization || "");
   if (auth === `Bearer ${BEARER}`) return true;
 
-  // (extra) aceitar ?token=xxx
+  // fallback opcional
   const qToken = String(req.query?.token || "");
   if (qToken && qToken === BEARER) return true;
 
-  // (extra) aceitar header alternativo
   const xToken = String(req.headers["x-api-key"] || "");
   if (xToken && xToken === BEARER) return true;
 
@@ -75,11 +73,8 @@ function sseHeaders(res) {
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no"); // importante em proxy
 
-  // importante em proxy (nginx/easypanel) pra não bufferizar SSE
-  res.setHeader("X-Accel-Buffering", "no");
-
-  // CORS no stream também
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -93,22 +88,22 @@ function sseSend(res, event, dataObj) {
 }
 
 function handleSseListTools(req, res) {
-  if (!isAuthed(req)) {
-    // pra SSE, dá pra responder 401 normal
-    return res.status(401).end("Unauthorized");
-  }
+  if (!isAuthed(req)) return res.status(401).end("Unauthorized");
 
   sseHeaders(res);
-
-  // DigoChat costuma ler "tools" e o objeto { tools: [...] }
   sseSend(res, "tools", { tools: listToolsPayload() });
 
-  // keep-alive (evita timeout)
   const timer = setInterval(() => {
     res.write(`: ping\n\n`);
   }, 15000);
 
   req.on("close", () => clearInterval(timer));
+}
+
+function looksLikeJsonRpc(body) {
+  if (!body || typeof body !== "object") return false;
+  // JSON-RPC típico tem method e/ou jsonrpc
+  return typeof body.method === "string" || body.jsonrpc === "2.0";
 }
 
 // ------------------- Rotas básicas -------------------
@@ -124,27 +119,28 @@ app.post("/token", (req, res) => {
   res.json({ status: "success" });
 });
 
-// ------------------- DigoChat: LIST-TOOLS (SSE) -------------------
-// DigoChat (pelo seu print) faz POST list-tools. Então suportamos GET e POST.
+// ------------------- SSE list-tools (DigoChat) -------------------
 app.get("/list-tools", handleSseListTools);
 app.post("/list-tools", handleSseListTools);
 
 app.get("/mcp/list-tools", handleSseListTools);
 app.post("/mcp/list-tools", handleSseListTools);
 
-// alguns tentam bater no root esperando SSE
+// root também pode servir SSE (alguns clientes usam isso)
 app.get("/", (req, res) => {
-  res.status(200).send("OK. Use GET/POST /list-tools (SSE) ou POST /mcp (JSON-RPC).");
+  res.status(200).send("OK. Use /list-tools (SSE) ou POST /mcp (JSON-RPC).");
 });
+app.post("/", (req, res) => handleSseListTools(req, res));
 
-// debug JSON (sem SSE)
-app.get("/tools", (req, res) => {
-  if (!isAuthed(req)) return res.status(401).send("Unauthorized");
-  res.json(listToolsPayload());
-});
+// ------------------- /mcp: SSE (se NÃO for JSON-RPC), senão JSON-RPC -------------------
+app.get("/mcp", (req, res) => handleSseListTools(req, res));
 
-// ------------------- JSON-RPC (fallback) -------------------
 app.post("/mcp", async (req, res) => {
+  // se não parece JSON-RPC, tratamos como SSE list-tools (isso evita o erro do DigoChat)
+  if (!looksLikeJsonRpc(req.body)) {
+    return handleSseListTools(req, res);
+  }
+
   if (!isAuthed(req)) {
     return res.status(401).json({
       jsonrpc: "2.0",
@@ -171,11 +167,7 @@ app.post("/mcp", async (req, res) => {
       const tool = tools[toolName];
 
       if (!tool) {
-        return res.json({
-          jsonrpc: "2.0",
-          id: rpcId,
-          error: { message: "Tool not found" },
-        });
+        return res.json({ jsonrpc: "2.0", id: rpcId, error: { message: "Tool not found" } });
       }
 
       const result = await tool.handler(args);
@@ -190,11 +182,7 @@ app.post("/mcp", async (req, res) => {
       });
     }
 
-    return res.json({
-      jsonrpc: "2.0",
-      id: rpcId,
-      error: { message: "Method not found" },
-    });
+    return res.json({ jsonrpc: "2.0", id: rpcId, error: { message: "Method not found" } });
   } catch (e) {
     return res.status(400).json({
       jsonrpc: "2.0",
@@ -204,9 +192,13 @@ app.post("/mcp", async (req, res) => {
   }
 });
 
-// opcional: evitar "Cannot GET /mcp"
-app.get("/mcp", (req, res) => res.status(200).send("OK. Use POST /mcp (JSON-RPC) ou GET/POST /list-tools (SSE)."));
+// debug JSON (sem SSE)
+app.get("/tools", (req, res) => {
+  if (!isAuthed(req)) return res.status(401).send("Unauthorized");
+  res.json(listToolsPayload());
+});
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`MCP server on 0.0.0.0:${PORT}`);
+  console.log(`Auth: ${BEARER ? "ON (Bearer)" : "OFF"}`);
 });
